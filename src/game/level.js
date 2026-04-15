@@ -55,6 +55,7 @@ export const createInitialState = () => {
     isGameOver: false,
     levelCleared: false,
     roundActive: false,
+    scoreSubmitted: false,
     paddle,
     ball: {
       x: paddle.x + paddle.width / 2,

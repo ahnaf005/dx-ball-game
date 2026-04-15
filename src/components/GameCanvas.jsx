@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { getTopScores, saveScore } from '../appwrite'
 import {
   BACKGROUND_STARS,
   BRICK_COLORS,
@@ -28,6 +29,12 @@ const drawRoundedRect = (ctx, x, y, width, height, radius) => {
   ctx.closePath()
 }
 
+const initialPromptState = {
+  isOpen: false,
+  outcome: '',
+  score: 0,
+}
+
 function GameCanvas() {
   const canvasRef = useRef(null)
   const animationFrameRef = useRef(0)
@@ -50,6 +57,52 @@ function GameCanvas() {
     isGameOver: false,
     bricksLeft: BRICK_ROWS * createBrickField().columns,
   }))
+  const [leaderboard, setLeaderboard] = useState([])
+  const [leaderboardStatus, setLeaderboardStatus] = useState({
+    loading: true,
+    error: '',
+  })
+  const [namePrompt, setNamePrompt] = useState(initialPromptState)
+  const [playerName, setPlayerName] = useState('')
+  const [saveStatus, setSaveStatus] = useState({
+    saving: false,
+    error: '',
+  })
+
+  const refreshLeaderboard = async () => {
+    setLeaderboardStatus({ loading: true, error: '' })
+
+    try {
+      const scores = await getTopScores(3)
+      setLeaderboard(scores)
+      setLeaderboardStatus({ loading: false, error: '' })
+    } catch (error) {
+      setLeaderboardStatus({
+        loading: false,
+        error: error.message || 'Could not load leaderboard.',
+      })
+    }
+  }
+
+  useEffect(() => {
+    refreshLeaderboard()
+  }, [])
+
+  const openNamePrompt = (outcome, score) => {
+    setPlayerName('')
+    setSaveStatus({ saving: false, error: '' })
+    setNamePrompt({
+      isOpen: true,
+      outcome,
+      score,
+    })
+  }
+
+  const closeNamePrompt = () => {
+    setPlayerName('')
+    setSaveStatus({ saving: false, error: '' })
+    setNamePrompt(initialPromptState)
+  }
 
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -60,9 +113,10 @@ function GameCanvas() {
         if (!game.roundActive && !game.isGameOver && !game.levelCleared) {
           game.roundActive = true
           setHud((current) => ({ ...current, isPlaying: true }))
-        } else if (game.isGameOver || game.levelCleared) {
+        } else if ((game.isGameOver || game.levelCleared) && !namePrompt.isOpen) {
           const nextGame = createInitialState()
           gameRef.current = nextGame
+          closeNamePrompt()
           setHud({
             score: nextGame.score,
             lives: nextGame.lives,
@@ -92,7 +146,7 @@ function GameCanvas() {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
     }
-  }, [])
+  }, [namePrompt.isOpen])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -107,7 +161,11 @@ function GameCanvas() {
       const pointerX = (event.clientX - rect.left) * scaleX
       const game = gameRef.current
 
-      game.paddle.x = clamp(pointerX - game.paddle.width / 2, 0, CANVAS_WIDTH - game.paddle.width)
+      game.paddle.x = clamp(
+        pointerX - game.paddle.width / 2,
+        0,
+        CANVAS_WIDTH - game.paddle.width,
+      )
 
       if (!game.roundActive) {
         game.ball.x = game.paddle.x + game.paddle.width / 2
@@ -254,13 +312,13 @@ function GameCanvas() {
         ctx.textAlign = 'center'
         ctx.font = '700 34px "Trebuchet MS", sans-serif'
         ctx.fillText(
-          game.levelCleared ? 'Level Cleared' : 'Game Over',
+          game.levelCleared ? 'Stage Cleared' : 'Game Over',
           CANVAS_WIDTH / 2,
           CANVAS_HEIGHT / 2 - 18,
         )
         ctx.font = '500 19px "Trebuchet MS", sans-serif'
         ctx.fillText(
-          'Press Restart or Space to play again',
+          'Enter your name to save your score',
           CANVAS_WIDTH / 2,
           CANVAS_HEIGHT / 2 + 18,
         )
@@ -365,15 +423,18 @@ function GameCanvas() {
       if (!game.roundActive) {
         game.ball.x = game.paddle.x + game.paddle.width / 2
         game.ball.y = game.paddle.y - game.ball.radius - 2
-        updateHud(game)
-        return
+      } else {
+        advanceBall(game, deltaSeconds)
       }
-
-      advanceBall(game, deltaSeconds)
 
       if (game.bricks.every((brick) => brick.destroyed)) {
         game.levelCleared = true
         game.roundActive = false
+      }
+
+      if ((game.isGameOver || game.levelCleared) && !game.scoreSubmitted) {
+        game.scoreSubmitted = true
+        openNamePrompt(game.levelCleared ? 'Stage Cleared' : 'Game Over', game.score)
       }
 
       updateHud(game)
@@ -403,6 +464,7 @@ function GameCanvas() {
     const nextGame = createInitialState()
     gameRef.current = nextGame
     lastTimeRef.current = 0
+    closeNamePrompt()
     setHud({
       score: nextGame.score,
       lives: nextGame.lives,
@@ -411,6 +473,32 @@ function GameCanvas() {
       isGameOver: false,
       bricksLeft: nextGame.bricks.filter((brick) => !brick.destroyed).length,
     })
+  }
+
+  const handleSaveScore = async (event) => {
+    event.preventDefault()
+
+    const trimmedName = playerName.trim()
+    if (!trimmedName) {
+      setSaveStatus({
+        saving: false,
+        error: 'Enter your name before saving your score.',
+      })
+      return
+    }
+
+    setSaveStatus({ saving: true, error: '' })
+
+    try {
+      await saveScore(trimmedName, namePrompt.score)
+      await refreshLeaderboard()
+      closeNamePrompt()
+    } catch (error) {
+      setSaveStatus({
+        saving: false,
+        error: error.message || 'Could not save your score.',
+      })
+    }
   }
 
   return (
@@ -433,25 +521,104 @@ function GameCanvas() {
         </button>
       </div>
 
-      <div className="canvas-frame">
-        <canvas
-          ref={canvasRef}
-          width={CANVAS_WIDTH}
-          height={CANVAS_HEIGHT}
-          className="game-canvas"
-          aria-label="DX Ball game board"
-        />
+      <div className="game-layout">
+        <div className="play-column">
+          <div className="canvas-frame">
+            <canvas
+              ref={canvasRef}
+              width={CANVAS_WIDTH}
+              height={CANVAS_HEIGHT}
+              className="game-canvas"
+              aria-label="DX Ball game board"
+            />
+          </div>
+
+          <p className="status-text" role="status">
+            {hud.levelCleared
+              ? 'The stage is clear. Save the score or restart for another run.'
+              : hud.isGameOver
+                ? 'The ball slipped past the paddle. Save the score or restart.'
+                : hud.isPlaying
+                  ? 'Keep the rally alive and use the paddle edge to steer the shot.'
+                  : 'Press Space to serve the ball and start the round.'}
+          </p>
+        </div>
+
+        <aside className="leaderboard-panel" aria-label="Leaderboard">
+          <div className="leaderboard-header">
+            <p className="eyebrow leaderboard-eyebrow">Hall of Fame</p>
+            <h2>Top 3 Players</h2>
+            <p className="leaderboard-copy">
+              Scores are saved when the round ends.
+            </p>
+          </div>
+
+          {leaderboardStatus.loading ? (
+            <p className="leaderboard-message">Loading leaderboard...</p>
+          ) : leaderboardStatus.error ? (
+            <p className="leaderboard-message leaderboard-error">{leaderboardStatus.error}</p>
+          ) : leaderboard.length === 0 ? (
+            <p className="leaderboard-message">No scores yet. Be the first on the board.</p>
+          ) : (
+            <ol className="leaderboard-list">
+              {leaderboard.map((entry, index) => (
+                <li key={entry.id} className="leaderboard-entry">
+                  <span className="leaderboard-rank">#{index + 1}</span>
+                  <div>
+                    <strong>{entry.playerName}</strong>
+                    <p>{entry.score} pts</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </aside>
       </div>
 
-      <p className="status-text" role="status">
-        {hud.levelCleared
-          ? 'Every brick is gone. Tap restart for another round.'
-          : hud.isGameOver
-            ? 'The ball slipped past the paddle. Restart when you are ready.'
-            : hud.isPlaying
-              ? 'Keep the rally alive and use the paddle edge to steer the shot.'
-              : 'Press Space to serve the ball and start the round.'}
-      </p>
+      {namePrompt.isOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <div
+            className="score-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="score-modal-title"
+          >
+            <p className="eyebrow leaderboard-eyebrow">Save Score</p>
+            <h2 id="score-modal-title">{namePrompt.outcome}</h2>
+            <p className="modal-copy">
+              Your score is <strong>{namePrompt.score}</strong>. Enter your name to post it to
+              the leaderboard.
+            </p>
+
+            <form className="score-form" onSubmit={handleSaveScore}>
+              <label className="input-label" htmlFor="player-name">
+                Player Name
+              </label>
+              <input
+                id="player-name"
+                name="player-name"
+                type="text"
+                maxLength={30}
+                value={playerName}
+                onChange={(event) => setPlayerName(event.target.value)}
+                placeholder="Arcade champion"
+                autoFocus
+              />
+
+              {saveStatus.error ? <p className="form-error">{saveStatus.error}</p> : null}
+
+              <div className="modal-actions">
+                <button type="submit" className="primary-button" disabled={saveStatus.saving}>
+                  {saveStatus.saving ? 'Saving...' : 'Save Score'}
+                </button>
+                <button type="button" className="secondary-button" onClick={closeNamePrompt}>
+                  Skip
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }
